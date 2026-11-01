@@ -3,4 +3,6 @@ venv/
 __pycache__/
 *.pyc
 .env
-dist/
+
+# Cho phép đưa thư mục dist lên GitHub để người tải về chạy ngay qua start_webgis.bat mà không cần cài Node.js
+!frontend_react/dist/
