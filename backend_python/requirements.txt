@@ -1,0 +1,15 @@
+# Backend Python for LST-HCM WebGIS
+fastapi==0.143.0
+uvicorn==0.54.0
+pydantic==2.14.0
+numpy==2.4.6
+pandas==3.0.6
+scikit-learn==1.9.1
+statsmodels==0.15.0
+xgboost==3.2.0
+torch>=2.2          # GCN-LSTM thật (gcn_lstm_torch.py); bản CPU là đủ
+pyjwt==2.15.1
+psycopg2-binary==2.9.13
+python-multipart==0.0.32
+python-dotenv
+bcrypt
