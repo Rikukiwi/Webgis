@@ -190,7 +190,7 @@ export default function App({ initialTab = 'gis', onHome, currentUser, setCurren
   const [prepThreshold, setPrepThreshold] = useState(60);
   const [prepSyncTime, setPrepSyncTime] = useState('Giu_nguyen');
   const [prepNorm, setPrepNorm] = useState('Z-score');
-  const [prepTrainEndYear, setPrepTrainEndYear] = useState('2022');
+  const [prepTrainEndYear, setPrepTrainEndYear] = useState('2023');
   const [prepSaving, setPrepSaving] = useState(false);
   const [prepAlert, setPrepAlert] = useState(null);
   const [prepPointHover, setPrepPointHover] = useState(null);
@@ -753,33 +753,40 @@ export default function App({ initialTab = 'gis', onHome, currentUser, setCurren
     }
   };
 
-  // Nạp bộ dữ liệu mẫu GEE (Yêu cầu quyền ADMIN)
-  const handleUseSampleCsv = async () => {
+  // Nạp tệp CSV thật lên CSDL (Yêu cầu quyền ADMIN)
+  const [csvReport, setCsvReport] = useState(null);
+  const handleUploadCsv = async (file, validateOnly = false) => {
     if (!isAdmin) {
       setPrepAlert({ type: 'error', msg: '🔒 Yêu cầu quyền ADMIN: Chỉ Quản trị viên mới được nạp bộ dữ liệu mới.' });
       return;
     }
+    if (!file) return;
+    if (!file.name.toLowerCase().endsWith('.csv')) {
+      setPrepAlert({ type: 'error', msg: 'Chỉ nhận tệp .csv' });
+      return;
+    }
+    if (file.size > 50 * 1024 * 1024) {
+      setPrepAlert({ type: 'error', msg: 'Tệp vượt quá 50MB.' });
+      return;
+    }
     setUploadingDataset(true);
     setPrepAlert(null);
+    setCsvReport(null);
     try {
-      const res = await fetch(`${API_BASE}/datasets/create`, {
+      const fd = new FormData();
+      fd.append('file', file);
+      fd.append('ten_dataset', file.name.replace(/\.csv$/i, ''));
+      fd.append('chi_kiem_tra', validateOnly ? 'true' : 'false');
+      const res = await fetch(`${API_BASE}/datasets/upload-csv`, {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...getAuthHeaders()
-        },
-        body: JSON.stringify({
-          ten_dataset: `Chuỗi LST-NDVI-TVDI TP.HCM (GEE #${datasetsList.length + 1})`,
-          nguon_du_lieu: 'Landsat 8/9 + MODIS (GEE)',
-          thoi_gian_bat_dau: '2015-01-15',
-          thoi_gian_ket_thuc: '2025-12-31',
-          duong_dan_file: 'C:\\data\\gee_export_hcm.csv'
-        })
+        headers: { ...getAuthHeaders() },
+        body: fd
       });
       const data = await res.json();
-      if (!res.ok) throw new Error(data.detail || 'Lỗi nạp dataset');
-      setPrepAlert({ type: 'success', msg: `✅ ${data.message || 'Đã nạp bộ dữ liệu mẫu GEE thành công!'}` });
-      loadDatasets();
+      if (!res.ok) throw new Error(typeof data.detail === 'string' ? data.detail : 'Lỗi nạp CSV');
+      setCsvReport(data.report);
+      setPrepAlert({ type: 'success', msg: `✅ ${data.message}` });
+      if (!validateOnly) loadDatasets();
     } catch (err) {
       setPrepAlert({ type: 'error', msg: err.message });
     } finally {
@@ -1858,7 +1865,7 @@ export default function App({ initialTab = 'gis', onHome, currentUser, setCurren
                     <span>LST tháng {tsMonth} qua các năm · {tsData?.ten_khu_vuc || 'TP.HCM'}</span>
                   </h2>
                   <div style={{ fontSize: '13px', color: '#475569' }}>
-                    {tsData?.insight_text || `Từ 2015 đến 2025 LST tháng ${tsMonth} tăng 0,2°C (30,6 → 30,8), xu hướng +0,045/năm.`}
+                    {tsData?.insight_text || `Từ 2021 đến 2025 LST tháng ${tsMonth} đang tải...`}
                   </div>
                 </div>
 
@@ -1919,12 +1926,12 @@ export default function App({ initialTab = 'gis', onHome, currentUser, setCurren
                 </div>
               </div>
 
-              {/* BIỂU ĐỒ LINE CHART SVG CHUỖI NĂM (2015 -> 2027) */}
+              {/* BIỂU ĐỒ LINE CHART SVG CHUỖI NĂM (2021 -> 2027) */}
               <div style={{ position: 'relative', width: '100%', height: '240px', marginTop: '16px' }}>
                 {(() => {
                   const items = tsData?.years_data || [];
                   if (items.length === 0) {
-                    return <div style={{ color: '#94a3b8', textAlign: 'center', paddingTop: '80px' }}>Đang tải biểu đồ...</div>;
+                    return <div style={{ color: '#94a3b8', textAlign: 'center', paddingTop: '80px' }}>{tsData ? 'Chưa có dữ liệu LST trong CSDL cho lựa chọn này. Hãy nạp CSV ở tab Dữ liệu.' : 'Đang tải biểu đồ...'}</div>;
                   }
 
                   const minLST = Math.floor(Math.min(...items.map(i => i.lst)) * 2) / 2 - 0.5;
@@ -1936,7 +1943,7 @@ export default function App({ initialTab = 'gis', onHome, currentUser, setCurren
                   const padTop = 15;
                   const padBottom = 30;
 
-                  const getX = (idx) => padLeft + (idx / (items.length - 1)) * (svgWidth - padLeft - padRight);
+                  const getX = (idx) => padLeft + (idx / Math.max(1, items.length - 1)) * (svgWidth - padLeft - padRight);
                   const getY = (val) => padTop + (1 - (val - minLST) / (maxLST - minLST)) * (svgHeight - padTop - padBottom);
 
                   // Chia làm 2 path: Quá khứ (nét liền xanh đậm #0f766e) & Tương lai (nét đứt cam đỏ #ea580c)
@@ -1977,7 +1984,7 @@ export default function App({ initialTab = 'gis', onHome, currentUser, setCurren
 
                       {/* Trục X nhãn năm */}
                       {items.map((it, idx) => {
-                        if (it.nam % 2 !== 1 && it.nam !== 2027) return null; // hiện các năm lẻ: 2015, 2017... 2027
+                        if (it.nam % 2 !== 1 && it.nam !== 2027) return null; // hiện các năm lẻ: 2021, 2023, 2025, 2027
                         const xPos = getX(idx);
                         return (
                           <g key={it.nam}>
@@ -2045,10 +2052,14 @@ export default function App({ initialTab = 'gis', onHome, currentUser, setCurren
                 <div style={{ flex: 1, position: 'relative', width: '100%', minHeight: '220px', marginTop: '10px' }}>
                   {(() => {
                     const series = tsData?.monthly_series || [];
-                    if (series.length === 0) return <div style={{ color: '#94a3b8', textAlign: 'center', paddingTop: '60px' }}>Đang nạp chuỗi thời gian...</div>;
+                    if (series.length === 0) return <div style={{ color: '#94a3b8', textAlign: 'center', paddingTop: '60px' }}>{tsData ? 'Chưa có dữ liệu chuỗi thời gian.' : 'Đang nạp chuỗi thời gian...'}</div>;
 
-                    const minVal = 27.5;
-                    const maxVal = 37.0;
+                    const allVals = series.flatMap(x => [x.lst_obs, x.lst_forecast, x.lst_scenario, x.upper_bound, x.lower_bound]).filter(v => v !== null && v !== undefined);
+                    const minVal = Math.floor(Math.min(...allVals)) - 1;
+                    const maxVal = Math.ceil(Math.max(...allVals)) + 1;
+                    const yStep = Math.max(1, Math.round((maxVal - minVal) / 5));
+                    const yTickList = [];
+                    for (let t = Math.ceil(minVal); t <= maxVal; t += yStep) yTickList.push(t);
                     const w = 680;
                     const h = 200;
                     const pL = 35;
@@ -2056,7 +2067,9 @@ export default function App({ initialTab = 'gis', onHome, currentUser, setCurren
                     const pT = 15;
                     const pB = 30;
 
-                    const getX = (idx) => pL + (idx / (series.length - 1)) * (w - pL - pR);
+                    const tOf = (i) => (series[i].nam - series[0].nam) * 12 + series[i].thang - 1;
+                    const tMax = Math.max(1, tOf(series.length - 1));
+                    const getX = (idx) => pL + (tOf(idx) / tMax) * (w - pL - pR);
                     const getY = (val) => pT + (1 - (val - minVal) / (maxVal - minVal)) * (h - pT - pB);
 
                     // Phân chia dữ liệu Hiện trạng (trước 2026) và Dự báo (từ 2026 trở đi)
@@ -2084,15 +2097,16 @@ export default function App({ initialTab = 'gis', onHome, currentUser, setCurren
                     });
 
                     // Vị trí vạch ngăn "dự báo"
-                    const fcStartIdx = series.findIndex(s => s.nam === 2026);
-                    const fcStartX = fcStartIdx >= 0 ? getX(fcStartIdx) : w * 0.8;
+                    const fcStartIdx = series.findIndex(s => s.lst_forecast !== null && s.lst_obs === null);
+                    const hasFc = fcStartIdx >= 0;
+                    const fcStartX = hasFc ? getX(fcStartIdx) : w - pR;
 
                     return (
                       <svg viewBox={`0 0 ${w} ${h}`} style={{ width: '100%', height: '100%', overflow: 'visible' }}>
                         {/* Vùng bóng dự báo đỏ nhạt (Forecast Shaded Zone) */}
-                        <rect x={fcStartX} y={pT} width={w - pR - fcStartX} height={h - pT - pB} fill="rgba(239, 68, 68, 0.08)" />
-                        <line x1={fcStartX} y1={pT} x2={fcStartX} y2={h - pB} stroke="#ea580c" strokeWidth="1.5" />
-                        <text x={fcStartX + 6} y={pT + 12} fontSize="11" fill="#ea580c" fontWeight="600">dự báo</text>
+                        {hasFc && <rect x={fcStartX} y={pT} width={w - pR - fcStartX} height={h - pT - pB} fill="rgba(239, 68, 68, 0.08)" />}
+                        {hasFc && <line x1={fcStartX} y1={pT} x2={fcStartX} y2={h - pB} stroke="#ea580c" strokeWidth="1.5" />}
+                        {hasFc && <text x={fcStartX + 6} y={pT + 12} fontSize="11" fill="#ea580c" fontWeight="600">dự báo</text>}
 
                         {/* Dải bóng tin cậy confidence band */}
                         {upperPts.length > 0 && (
@@ -2103,7 +2117,7 @@ export default function App({ initialTab = 'gis', onHome, currentUser, setCurren
                         )}
 
                         {/* Đường lưới ngang Y */}
-                        {[28, 30, 32, 34, 36].map(t => {
+                        {yTickList.map(t => {
                           const yPos = getY(t);
                           return (
                             <g key={t}>
@@ -2125,8 +2139,8 @@ export default function App({ initialTab = 'gis', onHome, currentUser, setCurren
                         <path d={scPts.join(' ')} fill="none" stroke="#16a34a" strokeWidth="1.8" strokeDasharray="3 3" />
 
                         {/* Nhãn năm trục X */}
-                        {[2015, 2017, 2019, 2021, 2023, 2025, 2027].map(yr => {
-                          const idx = series.findIndex(s => s.nam === yr && s.thang === 6);
+                        {[2021, 2022, 2023, 2024, 2025, 2026, 2027].map(yr => {
+                          const idx = series.findIndex(s => s.nam === yr);
                           if (idx < 0) return null;
                           const x = getX(idx);
                           return (
@@ -2161,16 +2175,17 @@ export default function App({ initialTab = 'gis', onHome, currentUser, setCurren
               <div style={{ background: '#ffffff', borderRadius: '12px', border: '1px solid #e2e8f0', boxShadow: '0 1px 4px rgba(0,0,0,0.06)', padding: '20px', display: 'flex', flexDirection: 'column' }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
                   <h3 style={{ fontSize: '15px', fontWeight: 700, color: '#0f172a', margin: 0 }}>
-                    Xếp hạng quận huyện
+                    Xếp hạng phường/xã
                   </h3>
                   <ArrowUpDown size={14} color="#94a3b8" />
                 </div>
                 <div style={{ fontSize: '11px', color: '#64748b', marginBottom: '16px' }}>
-                  LST trung bình {tsData?.forecast_period || `tháng ${tsMonth < 10 ? '0' + tsMonth : tsMonth}/2026`}, Dự báo AI
+                  LST trung bình {tsData?.forecast_period || 'đang tải...'}
                 </div>
 
                 {/* Danh sách thanh progress bar xếp hạng */}
                 <div style={{ flex: 1, overflowY: 'auto', display: 'flex', flexDirection: 'column', gap: '10px', paddingRight: '4px' }}>
+                  {(tsData?.rankings || []).length === 0 && tsData && <div style={{ color: '#94a3b8', fontSize: '12px' }}>Chưa có dữ liệu phường/xã cho tháng này.</div>}
                   {(tsData?.rankings || []).map((rk, idx) => {
                     // Màu sắc theo nhiệt độ: >36 đỏ cam, 34-36 vàng cam, <34 xanh dịu
                     const barColor = rk.lst >= 37.0 ? '#f97316' : rk.lst >= 35.5 ? '#fb923c' : rk.lst >= 34.0 ? '#facc15' : '#86efac';
@@ -2678,12 +2693,12 @@ export default function App({ initialTab = 'gis', onHome, currentUser, setCurren
                 <div className="card-header">
                   <span className="card-title">
                     <UploadCloud size={16} color="#22d3ee" />
-                    1. Nạp bộ dữ liệu CSV/GeoTIFF từ GEE
+                    1. Nạp bộ dữ liệu CSV từ GEE
                   </span>
                 </div>
                 <div className="card-body" style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
                   <p style={{ fontSize: '12px', color: 'var(--text-muted)', lineHeight: '1.5' }}>
-                    CSV cần các cột: <code style={{ color: 'var(--accent-sky)', background: 'rgba(34, 211, 238, 0.1)', padding: '2px 5px', borderRadius: '4px' }}>ngay</code>, <code style={{ color: 'var(--accent-sky)', background: 'rgba(34, 211, 238, 0.1)', padding: '2px 5px', borderRadius: '4px' }}>kinh_do</code>, <code style={{ color: 'var(--accent-sky)', background: 'rgba(34, 211, 238, 0.1)', padding: '2px 5px', borderRadius: '4px' }}>vi_do</code>, <code style={{ color: 'var(--accent-sky)', background: 'rgba(34, 211, 238, 0.1)', padding: '2px 5px', borderRadius: '4px' }}>lst</code> (ndvi, tvdi nếu có). Hệ thống kiểm tra ngay khi nạp.
+                    CSV (giai đoạn 2021–2025) cần các cột bắt buộc: <code style={{ color: 'var(--accent-sky)', background: 'rgba(34, 211, 238, 0.1)', padding: '2px 5px', borderRadius: '4px' }}>ngay</code>, <code style={{ color: 'var(--accent-sky)', background: 'rgba(34, 211, 238, 0.1)', padding: '2px 5px', borderRadius: '4px' }}>kinh_do</code>, <code style={{ color: 'var(--accent-sky)', background: 'rgba(34, 211, 238, 0.1)', padding: '2px 5px', borderRadius: '4px' }}>vi_do</code>, <code style={{ color: 'var(--accent-sky)', background: 'rgba(34, 211, 238, 0.1)', padding: '2px 5px', borderRadius: '4px' }}>lst</code>. Cột tùy chọn (dùng làm biến giải thích cho AI): <code style={{ color: 'var(--accent-sky)', background: 'rgba(34, 211, 238, 0.1)', padding: '2px 5px', borderRadius: '4px' }}>ndvi</code>, <code style={{ color: 'var(--accent-sky)', background: 'rgba(34, 211, 238, 0.1)', padding: '2px 5px', borderRadius: '4px' }}>tvdi</code>, <code style={{ color: 'var(--accent-sky)', background: 'rgba(34, 211, 238, 0.1)', padding: '2px 5px', borderRadius: '4px' }}>luong_mua</code>, <code style={{ color: 'var(--accent-sky)', background: 'rgba(34, 211, 238, 0.1)', padding: '2px 5px', borderRadius: '4px' }}>do_am_dat</code>, <code style={{ color: 'var(--accent-sky)', background: 'rgba(34, 211, 238, 0.1)', padding: '2px 5px', borderRadius: '4px' }}>lop_phu_be_mat</code>, <code style={{ color: 'var(--accent-sky)', background: 'rgba(34, 211, 238, 0.1)', padding: '2px 5px', borderRadius: '4px' }}>ma_khu_vuc</code>. <code>ngay</code> dạng YYYY-MM-DD, nằm trong 2021-01-01 → 2025-12-31; <code>lst</code> đơn vị °C. Hệ thống kiểm tra ngay khi nạp.
                   </p>
 
                   {/* Upload Box */}
@@ -2700,16 +2715,16 @@ export default function App({ initialTab = 'gis', onHome, currentUser, setCurren
                     <input
                       id="hidden-csv-input"
                       type="file"
-                      accept=".csv,.tif,.tiff,.geojson"
+                      accept=".csv"
                       style={{ display: 'none' }}
-                      onChange={() => handleUseSampleCsv()}
+                      onChange={(e) => { handleUploadCsv(e.target.files?.[0]); e.target.value = ''; }}
                     />
                     <UploadCloud size={32} color="#06b6d4" style={{ margin: '0 auto 8px', opacity: 0.8 }} />
                     <div style={{ fontSize: '13px', fontWeight: 600, color: 'var(--text-main)' }}>
-                      {uploadingDataset ? 'Đang tải dữ liệu GEE lên CSDL...' : 'Chọn hoặc kéo thả tệp CSV / GeoTIFF'}
+                      {uploadingDataset ? 'Đang tải dữ liệu GEE lên CSDL...' : 'Chọn tệp CSV (2021–2025)'}
                     </div>
                     <div style={{ fontSize: '11px', color: 'var(--text-dim)', marginTop: '4px' }}>
-                      Định dạng hỗ trợ: CSV trích xuất GEE, Landsat 8/9, Sentinel-3 (tối đa 50MB)
+                      CSV trích xuất từ GEE, dấu phẩy hoặc chấm phẩy (tối đa 50MB)
                     </div>
 
                     <div style={{ display: 'flex', justifyContent: 'center', gap: '10px', marginTop: '12px' }}>
@@ -2731,33 +2746,31 @@ export default function App({ initialTab = 'gis', onHome, currentUser, setCurren
                         Chọn tệp CSV
                       </button>
 
-                      <button
-                        type="button"
-                        style={{
-                          padding: '6px 14px',
-                          fontSize: '12px',
-                          background: 'rgba(6, 182, 212, 0.15)',
-                          border: '1px solid rgba(6, 182, 212, 0.4)',
-                          color: '#38bdf8',
-                          borderRadius: '8px',
-                          cursor: isAdmin ? 'pointer' : 'not-allowed',
-                          display: 'flex',
-                          alignItems: 'center',
-                          gap: '6px',
-                          fontWeight: 600,
-                          opacity: isAdmin ? 1 : 0.6
-                        }}
-                        disabled={uploadingDataset || !isAdmin}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          handleUseSampleCsv();
-                        }}
+                      <a
+                        href={`${API_BASE}/datasets/csv-template`}
+                        onClick={(e) => e.stopPropagation()}
+                        style={{ padding: '6px 14px', fontSize: '12px', background: 'rgba(6, 182, 212, 0.15)', border: '1px solid rgba(6, 182, 212, 0.4)', color: '#38bdf8', borderRadius: '8px', display: 'flex', alignItems: 'center', gap: '6px', fontWeight: 600, textDecoration: 'none' }}
                       >
                         <Sparkles size={14} />
-                        Dùng CSV mẫu GEE
-                      </button>
+                        Tải CSV mẫu
+                      </a>
                     </div>
                   </div>
+
+                  {csvReport && (
+                    <div style={{ fontSize: '12px', lineHeight: 1.6, color: 'var(--text-muted)', border: '1px solid rgba(6,182,212,0.3)', borderRadius: '8px', padding: '10px 12px' }}>
+                      <b style={{ color: 'var(--text-main)' }}>Kết quả kiểm tra CSV</b><br />
+                      {csvReport.dong_hop_le}/{csvReport.tong_dong} dòng hợp lệ · {csvReport.so_diem} điểm · {csvReport.ngay_dau} → {csvReport.ngay_cuoi}<br />
+                      LST: TB {csvReport.lst_tb} · min {csvReport.lst_min} · max {csvReport.lst_max} °C<br />
+                      {csvReport.cot_tuy_chon_thieu?.length > 0 && <span>Thiếu cột tùy chọn: {csvReport.cot_tuy_chon_thieu.join(', ')}<br /></span>}
+                      {csvReport.dong_bi_loai > 0 && (
+                        <span style={{ color: '#f97316' }}>
+                          Đã loại {csvReport.dong_bi_loai} dòng: {Object.entries(csvReport.ly_do_bi_loai || {}).map(([k, v]) => `${k} (${v})`).join('; ')}
+                          {(csvReport.vi_du_loi || []).length > 0 && ` — vd dòng ${csvReport.vi_du_loi.map(x => x.dong).join(', ')}`}
+                        </span>
+                      )}
+                    </div>
+                  )}
 
                   {/* Dataset Table */}
                   <div style={{ marginTop: '6px' }}>
@@ -2797,9 +2810,9 @@ export default function App({ initialTab = 'gis', onHome, currentUser, setCurren
                           ) : (
                             <tr>
                               <td style={{ fontFamily: 'JetBrains Mono' }}>#1</td>
-                              <td style={{ fontWeight: 600 }}>Chuỗi LST-NDVI-TVDI TP.HCM 2015-2025</td>
+                              <td style={{ fontWeight: 600 }}>Chuỗi LST-NDVI-TVDI TP.HCM 2021-2025</td>
                               <td>Landsat 8/9</td>
-                              <td>2015-01-01</td>
+                              <td>2021-01-01</td>
                               <td style={{ fontFamily: 'JetBrains Mono', color: 'var(--accent-sky)' }}>2,625</td>
                               <td style={{ color: '#f97316', fontWeight: 600 }}>34.06 °C</td>
                             </tr>
@@ -3096,18 +3109,18 @@ export default function App({ initialTab = 'gis', onHome, currentUser, setCurren
 
                 <div className="split-timeline-container" style={{ margin: '14px 0' }}>
                   <div className="split-timeline-bar">
-                    <div className="split-segment train" style={{ flex: 32 }}>
-                      Train 32
+                    <div className="split-segment train" style={{ flex: 36 }}>
+                      Train 36
                     </div>
-                    <div className="split-segment val" style={{ flex: 7 }}>
-                      Val 7
+                    <div className="split-segment val" style={{ flex: 12 }}>
+                      Val 12
                     </div>
-                    <div className="split-segment test" style={{ flex: 7 }}>
-                      Test 7
+                    <div className="split-segment test" style={{ flex: 12 }}>
+                      Test 12
                     </div>
                   </div>
                   <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '11px', color: 'var(--text-dim)' }}>
-                    <span>2015 – {prepTrainEndYear} (Tập Train 70%)</span>
+                    <span>2021 – {prepTrainEndYear} (Tập Train 70%)</span>
                     <span>{Number(prepTrainEndYear) + 1} (Val 15%)</span>
                     <span>{Number(prepTrainEndYear) + 2} – 2025 (Test 15%)</span>
                   </div>
@@ -3117,7 +3130,7 @@ export default function App({ initialTab = 'gis', onHome, currentUser, setCurren
                   Tham số từ tập Train: <code style={{ color: '#38bdf8' }}>mean 34.06 · std 1.76 · min 30.22 · max 36.99</code>. Ví dụ 35 °C → <b style={{ color: '#34d399' }}>0.531</b> sau chuẩn hóa.
                   <br />
                   <span style={{ color: 'var(--text-dim)', fontSize: '11.5px' }}>
-                    Cấu hình chính thức dùng mốc năm: Train 2015–2022, Val 2023, Test 2024–2025.
+                    Cấu hình chính thức dùng mốc năm: Train 2021–2023, Val 2024, Test 2025.
                   </span>
                 </div>
 
@@ -3233,8 +3246,8 @@ export default function App({ initialTab = 'gis', onHome, currentUser, setCurren
                           <td>LINEAR_INTERPOLATION</td>
                           <td>THRESHOLD_ZSCORE</td>
                           <td><span style={{ padding: '2px 6px', background: 'rgba(6, 182, 212, 0.15)', borderRadius: '4px', color: '#38bdf8' }}>Z_SCORE</span></td>
-                          <td>2022-12-31</td>
                           <td>2023-12-31</td>
+                          <td>2024-12-31</td>
                         </tr>
                       )}
                     </tbody>

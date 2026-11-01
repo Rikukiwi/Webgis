@@ -158,7 +158,7 @@ def seed_database():
 
     # 3. DATASET
     datasets = [
-        (1, "Landsat 8/9 LST TP.HCM (2020-2025)", "Chuỗi thời gian ảnh viễn thám độ phân giải không gian 30m, chu kỳ 16 ngày", "Landsat", "2020-01-01", "2025-12-31", "SAN_SANG"),
+        (1, "Landsat 8/9 LST TP.HCM (2021-2025)", "Chuỗi thời gian ảnh viễn thám độ phân giải không gian 30m, chu kỳ 16 ngày", "Landsat", "2021-01-01", "2025-12-31", "SAN_SANG"),
         (1, "MODIS Terra/Aqua LST Daily TP.HCM", "Chuỗi LST hàng ngày MOD11A1 độ phân giải 1km, giám sát chu kỳ ngày/đêm", "MODIS", "2021-01-01", "2025-12-31", "SAN_SANG"),
         (1, "Landsat-MODIS Fusion Harmonized LST", "Bộ dữ liệu tổng hợp không gian - thời gian phục vụ dự báo AI sâu", "Landsat_MODIS_Combined", "2021-01-01", "2025-12-31", "SAN_SANG")
     ]

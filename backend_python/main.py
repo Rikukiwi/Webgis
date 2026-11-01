@@ -25,13 +25,15 @@ from typing import Optional, Dict, Any
 import bcrypt
 import jwt
 import pandas as pd
-from fastapi import FastAPI, HTTPException, Query, Header
+from fastapi import FastAPI, HTTPException, Query, Header, UploadFile, File, Form
+from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from database import db
 from models_ai import run_model_training
 from preprocessor import LSTPreprocessor
+import csv_import
 
 app = FastAPI(
     title="Hệ thống WebGIS AI Dự báo LST - TP.HCM (API Service)",
@@ -176,14 +178,14 @@ class TienXuLySaveRequest(BaseModel):
     cach_xu_ly_thieu: str = "LINEAR_INTERPOLATION"
     cach_xu_ly_nhieu: str = "THRESHOLD_ZSCORE"
     phuong_phap_chuan_hoa: str = "MIN_MAX"
-    ngay_ket_thuc_train: str = "2022-12-31"
-    ngay_ket_thuc_val: str = "2023-12-31"
+    ngay_ket_thuc_train: str = "2023-12-31"
+    ngay_ket_thuc_val: str = "2024-12-31"
 
 
 class DatasetCreateRequest(BaseModel):
-    ten_dataset: str = "Landsat 8/9 LST TP.HCM (2020-2025)"
+    ten_dataset: str = "Landsat 8/9 LST TP.HCM (2021-2025)"
     nguon_du_lieu: str = "Landsat 8/9 OLI-TIRS (30m)"
-    thoi_gian_bat_dau: str = "2015-01-15"
+    thoi_gian_bat_dau: str = "2021-01-01"
     thoi_gian_ket_thuc: str = "2025-12-31"
     duong_dan_file: Optional[str] = "gee_landsat_lst_hcm.csv"
 
@@ -391,6 +393,48 @@ def create_dataset(req: DatasetCreateRequest, authorization: Optional[str] = Hea
     }
 
 
+@app.get("/api/datasets/csv-template", tags=["Bộ dữ liệu LST"])
+def csv_template():
+    """Tệp CSV mẫu đúng định dạng để nạp."""
+    return Response(csv_import.TEMPLATE_CSV, media_type="text/csv; charset=utf-8",
+                    headers={"Content-Disposition": "attachment; filename=lst_hcm_mau.csv"})
+
+
+@app.post("/api/datasets/upload-csv", tags=["Bộ dữ liệu LST"])
+async def upload_csv(
+    file: UploadFile = File(...),
+    ten_dataset: str = Form(""),
+    nguon_du_lieu: str = Form("Landsat 8/9 (GEE)"),
+    chi_kiem_tra: bool = Form(False),
+    authorization: Optional[str] = Header(None),
+):
+    """Nạp CSV thật vào CSDL (ADMIN). chi_kiem_tra=true: chỉ kiểm tra, không ghi."""
+    user = require_admin(authorization)
+    if not (file.filename or "").lower().endswith(".csv"):
+        raise HTTPException(400, "Chỉ nhận tệp .csv")
+    raw = await file.read()
+    try:
+        res = csv_import.parse_and_validate(raw)
+    except csv_import.CsvError as e:
+        raise HTTPException(422, str(e))
+    report = res["report"]
+    if chi_kiem_tra:
+        return {"status": "validated", "report": report, "message": "Tệp hợp lệ, chưa ghi vào CSDL."}
+    ten = ten_dataset.strip() or f"{file.filename} ({report['ngay_dau']} → {report['ngay_cuoi']})"
+    conn = db._connect()
+    try:
+        info = csv_import.insert_dataset(conn, res["df"], user.get("ma_nguoi_dung") or _admin_id() or 1,
+                                         ten, nguon_du_lieu, file.filename)
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        raise HTTPException(500, f"Lỗi ghi CSDL (đã hoàn tác): {e}")
+    finally:
+        conn.close()
+    return {"status": "success", "report": report, **info,
+            "message": f"Đã nạp {info['so_dong_nap']} dòng vào dataset #{info['ma_dataset']}."}
+
+
 # ==========================================
 # 4. DỮ LIỆU LST (du_lieu_chi_so, ma_chi_so = 'LST')
 # ==========================================
@@ -591,8 +635,8 @@ def trigger_training(req: TrainingRequest, authorization: Optional[str] = Header
     )
     txl = txl_rows[0] if txl_rows else {}
     ma_tien_xu_ly = txl.get("ma_tien_xu_ly")
-    train_end_date = str(txl.get("ngay_ket_thuc_train") or "2022-12-31")
-    val_end_date = str(txl.get("ngay_ket_thuc_val") or "2023-12-31")
+    train_end_date = str(txl.get("ngay_ket_thuc_train") or "2023-12-31")
+    val_end_date = str(txl.get("ngay_ket_thuc_val") or "2024-12-31")
 
     prep = LSTPreprocessor(train_end_date=train_end_date, val_end_date=val_end_date)
     df_clean, _ = prep.handle_missing(df)
@@ -881,109 +925,118 @@ def get_khu_vuc_yearly_lst(kv_id: int):
 
 @app.get("/api/timeseries-analysis", tags=["Dự báo LST & Bản đồ WebGIS"])
 def get_timeseries_analysis(
-    kv_id: Optional[int] = Query(None, description="Mã khu vực (None = Toàn TP.HCM)"),
-    thang: int = Query(1, description="Tháng cần so sánh qua các năm (1 -> 12)"),
-    nam_bat_dau: int = Query(2015, description="Năm bắt đầu"),
+    kv_id: Optional[int] = Query(None, description="ma_khu_vuc (None = Toàn TP.HCM)"),
+    thang: int = Query(1, ge=1, le=12, description="Tháng cần so sánh qua các năm (1 -> 12)"),
+    nam_bat_dau: int = Query(2021, description="Năm bắt đầu"),
     nam_ket_thuc: int = Query(2027, description="Năm kết thúc"),
+    ma_dataset: Optional[int] = Query(None, description="Chỉ lấy 1 dataset (None = tất cả)"),
 ):
     """
-    API phục vụ Chức năng 3: Xem biểu đồ chuỗi thời gian (Time-series Dashboard)
-    1. LST của 1 tháng cụ thể (ví dụ Tháng 1) qua các năm (2015 - 2027) có đường hiện trạng + đường dự báo đứt nét.
-    2. LST liên tục theo tất cả các tháng (monthly cycle).
-    3. Xếp hạng nhiệt độ các quận/huyện hoặc phường/xã lân cận.
+    Chuỗi thời gian LST tính từ dữ liệu thật trong du_lieu_chi_so (không sinh số mẫu):
+      - hiện trạng : GEE_ACTUAL / GEE_INTERPOLATED
+      - dự báo AI  : AI_FORECAST ; giả lập kịch bản: SIMULATION
+    Năm/tháng không có dữ liệu thì bỏ trống.
     """
-    # 1. Tên khu vực
     ten_kv = "Toàn TP.HCM"
+    where_kv, p_kv = "", []
     if kv_id and kv_id > 0:
         kv_row = db.query("SELECT ten_khu_vuc, loai_khu_vuc FROM khu_vuc WHERE ma_khu_vuc = %s", (kv_id,))
-        if kv_row:
-            loai = {"PHUONG": "Phường", "XA": "Xã", "DAC_KHU": "Đặc khu"}.get(kv_row[0]["loai_khu_vuc"], "")
-            ten_kv = f"{loai} {kv_row[0]['ten_khu_vuc']}".strip()
+        if not kv_row:
+            raise HTTPException(404, "Không tìm thấy khu vực")
+        if kv_row[0]["loai_khu_vuc"] == "THANH_PHO":
+            kv_id = None
+        else:
+            ten_kv = kv_row[0]["ten_khu_vuc"]
+            where_kv, p_kv = " AND f.ma_khu_vuc = %s", [kv_id]
+    where_ds, p_ds = ("", []) if ma_dataset is None else (" AND f.ma_dataset = %s", [ma_dataset])
+    base_params = [f"{nam_bat_dau}-01-01", f"{nam_ket_thuc}-12-31"] + p_kv + p_ds
 
-    # 2. Lấy chuỗi LST tháng `thang` qua các năm
-    # Sử dụng dữ liệu thực tế từ timeline / du_lieu_chi_so kết hợp mô hình AI ngoại suy
+    def monthly(kinds: str):
+        return db.query(
+            f"""
+            SELECT EXTRACT(YEAR FROM f.thoi_gian)::int AS nam, EXTRACT(MONTH FROM f.thoi_gian)::int AS thang,
+                   AVG(f.gia_tri) AS tb, STDDEV_SAMP(f.gia_tri) AS sd, COUNT(*) AS n
+            FROM du_lieu_chi_so f
+            WHERE f.ma_chi_so = 'LST' AND f.loai_nguon_du_lieu IN ({kinds})
+              AND f.thoi_gian BETWEEN %s::date AND %s::date {where_kv} {where_ds}
+            GROUP BY 1, 2 ORDER BY 1, 2
+            """,
+            tuple(base_params),
+        )
+
+    obs = {(r["nam"], r["thang"]): r for r in monthly("'GEE_ACTUAL','GEE_INTERPOLATED'")}
+    fc = {(r["nam"], r["thang"]): r for r in monthly("'AI_FORECAST'")}
+    sc = {(r["nam"], r["thang"]): r for r in monthly("'SIMULATION'")}
+    r1 = lambda v: None if v is None else round(float(v), 1)
+
+    # 1. LST của tháng `thang` qua các năm
     years_data = []
-    # Base LST tương ứng cho tháng đó ở khu vực
-    base_lst = 30.6 if kv_id is None else 31.2 + ((kv_id % 20) * 0.15)
-    # Dao động theo tháng: tháng 3, 4, 5 nóng nhất, tháng 12, 1 dịu hơn
-    month_offset = {1: -0.4, 2: 0.2, 3: 1.8, 4: 2.6, 5: 2.1, 6: 1.2, 7: 0.8, 8: 0.6, 9: 0.5, 10: 0.3, 11: -0.2, 12: -0.6}.get(thang, 0.0)
-    
-    # Sinh dữ liệu các năm từ 2015 đến 2027 (Khớp hệt Ảnh 2)
-    sample_variations = {
-        2015: -0.05, 2016: 0.8, 2017: -0.5, 2018: -0.42, 2019: 0.2,
-        2020: -0.25, 2021: -0.48, 2022: -0.05, 2023: 0.68, 2024: 0.92,
-        2025: 0.22, 2026: 0.48, 2027: 0.20
-    }
-
     for y in range(nam_bat_dau, nam_ket_thuc + 1):
-        delta = sample_variations.get(y, ((y - 2015) * 0.04))
-        val = round(base_lst + month_offset + delta, 1)
-        is_forecast = (y >= 2026)
-        years_data.append({
-            "nam": y,
-            "lst": val,
-            "is_forecast": is_forecast
-        })
+        o, f_ = obs.get((y, thang)), fc.get((y, thang))
+        if o:
+            years_data.append({"nam": y, "lst": r1(o["tb"]), "is_forecast": False})
+        elif f_:
+            years_data.append({"nam": y, "lst": r1(f_["tb"]), "is_forecast": True})
 
-    # Tính độ tăng/giảm LST và xu hướng
-    val_start = next((it["lst"] for it in years_data if it["nam"] == 2015), years_data[0]["lst"])
-    val_past_end = next((it["lst"] for it in years_data if it["nam"] == 2025), years_data[-2]["lst"])
-    diff = round(val_past_end - val_start, 1)
-    diff_text = f"tăng {diff}°C" if diff >= 0 else f"giảm {abs(diff)}°C"
-    trend_rate = round(diff / (2025 - 2015), 3)
-    trend_sign = f"+{trend_rate}" if trend_rate >= 0 else f"{trend_rate}"
-    insight_text = f"Từ 2015 đến 2025 LST tháng {thang} {diff_text} ({val_start} → {val_past_end}), xu hướng {trend_sign}/năm."
+    past = [it for it in years_data if not it["is_forecast"]]
+    if len(past) >= 2 and past[-1]["nam"] > past[0]["nam"]:
+        a_, b_ = past[0], past[-1]
+        diff = round(b_["lst"] - a_["lst"], 1)
+        rate = round(diff / (b_["nam"] - a_["nam"]), 3)
+        insight_text = (f"Từ {a_['nam']} đến {b_['nam']} LST tháng {thang} "
+                        f"{'tăng' if diff >= 0 else 'giảm'} {abs(diff)}°C ({a_['lst']} → {b_['lst']}), "
+                        f"xu hướng {'+' if rate >= 0 else ''}{rate}/năm.")
+    elif len(past) == 1:
+        insight_text = f"Chỉ có dữ liệu năm {past[0]['nam']} cho tháng {thang} ({past[0]['lst']}°C), chưa đủ để tính xu hướng."
+    else:
+        insight_text = f"Chưa có dữ liệu LST tháng {thang} cho khu vực này."
 
-    # 3. Chuỗi LST theo tháng liên tục (Monthly cycle 2015 -> 2027)
+    # 2. Chuỗi theo từng tháng
+    last_obs = max(obs) if obs else None
     monthly_series = []
-    for y in range(2015, 2028):
+    for y in range(nam_bat_dau, nam_ket_thuc + 1):
         for m in range(1, 13):
-            m_off = {1: -0.6, 2: 0.1, 3: 1.9, 4: 2.7, 5: 2.0, 6: 1.1, 7: 0.7, 8: 0.5, 9: 0.3, 10: 0.1, 11: -0.3, 12: -0.7}.get(m, 0.0)
-            y_trend = (y - 2015) * 0.04
-            noise = ((y * 13 + m * 7) % 11 - 5) * 0.08
-            actual_val = round(base_lst + m_off + y_trend + noise, 1)
-            is_fc = (y >= 2026)
-            
+            o, f_, c_ = obs.get((y, m)), fc.get((y, m)), sc.get((y, m))
+            if not (o or f_ or c_ or (y, m) == last_obs):
+                continue
+            sd = float(f_["sd"]) if f_ and f_["sd"] is not None else None
             monthly_series.append({
-                "date": f"{y}-{m:02d}",
-                "nam": y,
-                "thang": m,
-                "lst_obs": actual_val if not is_fc else None,
-                "lst_forecast": actual_val if is_fc or (y == 2025 and m == 12) else None,
-                "lst_scenario": round(actual_val + 0.5, 1) if is_fc else None,
-                "upper_bound": round(actual_val + 1.2, 1) if is_fc else None,
-                "lower_bound": round(actual_val - 1.2, 1) if is_fc else None,
+                "date": f"{y}-{m:02d}", "nam": y, "thang": m,
+                "lst_obs": r1(o["tb"]) if o else None,
+                # nối đường dự báo với điểm hiện trạng cuối cùng
+                "lst_forecast": r1(f_["tb"]) if f_ else (r1(o["tb"]) if (y, m) == last_obs and fc else None),
+                "lst_scenario": r1(c_["tb"]) if c_ else None,
+                "upper_bound": r1(float(f_["tb"]) + 1.96 * sd) if f_ and sd is not None else None,
+                "lower_bound": r1(float(f_["tb"]) - 1.96 * sd) if f_ and sd is not None else None,
             })
 
-    # 4. Xếp hạng các quận/huyện theo đúng tháng `thang` được chọn tại mốc dự báo 2026
-    # Điều chỉnh nhiệt độ từng quận/huyện dựa trên tháng (mùa khô tháng 3-5 nóng hơn mùa mưa tháng 9-12)
-    districts_base = [
-        ("Gò Vấp", 35.8),
-        ("Bình Tân", 35.7),
-        ("Quận 8", 35.4),
-        ("Quận 12", 34.3),
-        ("Quận 7", 34.3),
-        ("TP. Thủ Đức", 34.0),
-        ("Hóc Môn", 32.3),
-        ("Nhà Bè", 32.2),
-        ("Bình Chánh", 31.8),
-        ("Củ Chi", 30.9),
-        ("Cần Giờ", 29.5),
-    ]
-
-    rankings_raw = []
-    for d_name, d_base in districts_base:
-        # Nhiệt độ của quận trong tháng `thang` năm 2026 (dự báo)
-        d_val = round(d_base + month_offset + 0.48, 1)
-        # Tính % thanh progress bar (thang từ 26°C -> 40°C)
-        pct = max(10, min(100, round(((d_val - 26.0) / 14.0) * 100)))
-        rankings_raw.append({
-            "name": d_name,
-            "lst": d_val,
-            "pct": pct
-        })
-    # Sắp xếp giảm dần theo nhiệt độ
-    rankings_raw.sort(key=lambda x: x["lst"], reverse=True)
+    # 3. Xếp hạng phường/xã theo LST tháng `thang` (năm dự báo mới nhất nếu có, ngược lại năm hiện trạng mới nhất)
+    fc_years = sorted({y for (y, m) in fc if m == thang})
+    obs_years = sorted({y for (y, m) in obs if m == thang})
+    if fc_years:
+        rank_year, kinds, rank_label = fc_years[-1], "'AI_FORECAST'", "Dự báo AI"
+    elif obs_years:
+        rank_year, kinds, rank_label = obs_years[-1], "'GEE_ACTUAL','GEE_INTERPOLATED'", "Hiện trạng"
+    else:
+        rank_year, kinds, rank_label = None, None, ""
+    rankings = []
+    if rank_year:
+        rows = db.query(
+            f"""
+            SELECT k.ten_khu_vuc AS name, AVG(f.gia_tri) AS tb
+            FROM du_lieu_chi_so f JOIN khu_vuc k ON k.ma_khu_vuc = f.ma_khu_vuc
+            WHERE f.ma_chi_so = 'LST' AND f.loai_nguon_du_lieu IN ({kinds})
+              AND EXTRACT(YEAR FROM f.thoi_gian) = %s AND EXTRACT(MONTH FROM f.thoi_gian) = %s {where_ds}
+            GROUP BY k.ma_khu_vuc, k.ten_khu_vuc ORDER BY tb DESC LIMIT 15
+            """,
+            tuple([rank_year, thang] + p_ds),
+        )
+        if rows:
+            hi, lo = float(rows[0]["tb"]), float(rows[-1]["tb"])
+            for r in rows:
+                v = float(r["tb"])
+                pct = 100 if hi == lo else round(10 + 90 * (v - lo) / (hi - lo))
+                rankings.append({"name": r["name"], "lst": round(v, 1), "pct": pct})
 
     return {
         "kv_id": kv_id,
@@ -992,10 +1045,10 @@ def get_timeseries_analysis(
         "insight_text": insight_text,
         "years_data": years_data,
         "monthly_series": monthly_series,
-        "rankings": rankings_raw,
-        "forecast_period": f"tháng {thang:02d}/2026"
+        "rankings": rankings,
+        "forecast_period": f"tháng {thang:02d}/{rank_year}, {rank_label} (15 phường/xã nóng nhất)" if rank_year else "chưa có dữ liệu",
+        "co_du_lieu": bool(obs or fc or sc),
     }
-
 
 
 # ==========================================
